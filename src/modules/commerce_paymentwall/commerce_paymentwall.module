@@ -1,0 +1,282 @@
+<?php
+
+define('COMMERCE_PAYMENTWALL_ORDER_PROCESSING', 'processing');
+define('COMMERCE_PAYMENTWALL_ORDER_COMPLETED', 'completed');
+define('COMMERCE_PAYMENTWALL_ORDER_CANCELED', 'canceled');
+
+function commerce_paymentwall_commerce_payment_method_info()
+{
+    $payment_methods = array();
+    $payment_methods['commerce_paymentwall'] = array(
+        'title' => t('Paymentwall'),
+        'display_title' => t('Paymentwall'),
+        'description' => t('Provides payment during checkout via Paymentwall.'),
+    );
+
+    return $payment_methods;
+}
+
+function commerce_paymentwall_default_settings()
+{
+    return array(
+        'project_key' => '',
+        'secret_key' => '',
+        'widget' => '',
+        'success_url' => '',
+        'is_test' => 0,
+        'active' => 1,
+        'delivery_confirmation' => 0,
+        'display_name' => 'Paymentwall'
+    );
+}
+
+function commerce_paymentwall_settings_form($settings = null)
+{
+    $form = array();
+    $settings = (array)$settings + commerce_paymentwall_default_settings();
+
+    $library = libraries_detect('paymentwall');
+    if (!empty($library['error'])) {
+        drupal_set_message($library['error message'], 'error', FALSE);
+    }
+
+    $form['display_name'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Display name'),
+        '#size' => 40,
+        '#maxlength' => 40,
+        '#default_value' => $settings['display_name'],
+        '#required' => TRUE,
+    );
+
+    $form['project_key'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Project key'),
+        '#size' => 40,
+        '#maxlength' => 32,
+        '#default_value' => $settings['project_key'],
+        '#required' => TRUE,
+    );
+
+    $form['secret_key'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Secret key'),
+        '#size' => 40,
+        '#maxlength' => 32,
+        '#default_value' => $settings['secret_key'],
+        '#required' => TRUE,
+    );
+
+    $form['widget'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Widget'),
+        '#size' => 5,
+        '#maxlength' => 5,
+        '#default_value' => $settings['widget'],
+        '#required' => TRUE,
+    );
+    $form['success_url'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Success url'),
+        '#size' => 40,
+        '#maxlength' => 150,
+        '#default_value' => $settings['success_url'],
+        '#required' => FALSE,
+    );
+    $form['is_test'] = array(
+        '#type' => 'checkbox',
+        '#title' => t('Test mode'),
+        '#default_value' => $settings['is_test']
+    );
+    $form['delivery_confirmation'] = array(
+        '#type' => 'checkbox',
+        '#title' => t('Delivery Confirmation'),
+        '#default_value' => $settings['delivery_confirmation']
+    );
+
+    return $form;
+}
+
+function commerce_paymentwall_menu()
+{
+    $items = array();
+    // Add a menu item for configuring the detail payment rule
+    $items['admin/settings/commerce-paymentwall'] = array(
+        'title' => 'Commerce paymentwall Configuration',
+        'description' => 'Configure the Commerce paymentwall module',
+        'page callback' => 'commerce_paymentwall_configure',
+        'access arguments' => array('administer payment methods'),
+        'type' => MENU_CALLBACK,
+        'file' => 'commerce_paymentwall.admin.inc',
+    );
+    $items['pingback/paymentwall'] = array(
+        'title' => 'Pingback Paymentwall',
+        'description' => 'Pingback after payment via Paymentwall',
+        'page callback' => 'commerce_paymentwall_pingback',
+        'access arguments' => array('administer payment methods'),
+        'type' => MENU_CALLBACK,
+        'file' => 'commerce_paymentwall.module',
+    );
+
+    return $items;
+}
+
+function commerce_paymentwall_libraries_info()
+{
+    $libraries = array();
+    $libraries['paymentwall'] = array(
+        'name' => 'paymentwall',
+        'vendor' => 'http://www.paymentwall.com/',
+        'path' => 'paymentwall-php/lib',
+        'version' => '1.0.0',
+        'files' => array(
+            'php' => array(
+                'paymentwall.php',
+            ),
+        ),
+    );
+    return $libraries;
+}
+
+function commerce_paymentwall_init_config()
+{
+    $payment = commerce_payment_method_instance_load('commerce_paymentwall|commerce_payment_commerce_paymentwall');
+    $settings = $payment['settings'];
+    libraries_load('paymentwall');
+    Paymentwall_Config::getInstance()->set(array(
+        'api_type' => Paymentwall_Config::API_GOODS,
+        'public_key' => $settings['project_key'],
+        'private_key' => $settings['secret_key']
+    ));
+    return $settings;
+}
+
+function commerce_paymentwall_add_transaction($order,
+                                              $instance_id,
+                                              $amount,
+                                              $currency_code,
+                                              $status,
+                                              $message,
+                                              $remote_id)
+{
+
+    // Create a new transaction entity.
+    $transaction = commerce_payment_transaction_new('commerce_paymentwall', $order->order_id);
+    $transaction->instance_id = $instance_id;
+    $transaction->amount = $amount;
+    $transaction->currency_code = $currency_code;
+    $transaction->status = $status;
+    $transaction->message = $message;
+    $transaction->remote_id = $remote_id;
+
+    // Save the transaction.
+    commerce_payment_transaction_save($transaction);
+}
+
+function commerce_paymentwall_submit_form_validate($payment_method, $pane_form, $pane_values, $order, $form_parents = array())
+{
+    $widgetUrl = commerce_paymentwall_credit_card_validate($pane_values, $payment_method, $order, array('commerce_payment', 'payment_details'));
+    commerce_order_status_update($order, COMMERCE_PAYMENTWALL_ORDER_PROCESSING, false, true, 'Waiting payment via Paymentwall');
+    drupal_goto($widgetUrl);
+}
+
+function commerce_paymentwall_credit_card_validate($submitted_values, $payment_method_instance, $order = NULL, $form_parents = array())
+{
+    $balance = commerce_payment_order_balance($order);
+    $instance_id = $payment_method_instance['instance_id'];
+    $message = "Payment via Paymentwall";
+    $remote_id = $_SERVER['REMOTE_ADDR'];
+    $status = COMMERCE_PAYMENT_STATUS_SUCCESS;
+
+    commerce_paymentwall_add_transaction($order,
+        $instance_id,
+        $balance['amount'],
+        $balance['currency_code'],
+        $status,
+        $message,
+        $remote_id
+    );
+
+    return commerce_paymentwall_get_widget($order, $balance, $payment_method_instance['settings']);
+}
+
+function commerce_paymentwall_get_widget($order, $balance, $settings)
+{
+    commerce_paymentwall_init_config();
+    $widget = new Paymentwall_Widget(
+        $order->revision_uid,
+        $settings['widget'],
+        array(
+            new Paymentwall_Product(
+                $order->order_number,
+                $balance['amount'] / 100,
+                $balance['currency_code'],
+                'Order #' . $order->order_number
+            )
+        ),
+        array(
+            'email' => $order->mail,
+            'is_test' => $settings['is_test'],
+            'success_url' => $settings['success_url'],
+        )
+    );
+    return $widget->getUrl();
+}
+
+function commerce_paymentwall_pingback()
+{
+    $settings = commerce_paymentwall_init_config();
+    $params = $_GET;
+    unset($params['q']);
+    $pingback = new Paymentwall_Pingback($params, $_SERVER['REMOTE_ADDR']);
+
+    $orderId = $pingback->getProduct()->getId();
+    $order = commerce_order_load($orderId);
+
+    if (!$order || empty($orderId)) {
+        exit("Order is invalid !");
+    }
+
+    if ($pingback->validate()) {
+        if ($pingback->isDeliverable()) {
+            commerce_order_status_update($order, COMMERCE_PAYMENTWALL_ORDER_COMPLETED, false, true, 'Payment successfully via Paymentwall');
+            if ($settings['delivery_confirmation']) {
+                // Delivery Confirmation
+                $delivery = new Paymentwall_GenerericApiObject('delivery');
+                $delivery->post(prepare_delivery_confirmation_data($order, $pingback->getReferenceId(), $settings));
+            }
+        } else if ($pingback->isCancelable()) {
+            commerce_order_status_update($order, COMMERCE_PAYMENTWALL_ORDER_CANCELED, false, true, 'Payment canceled');
+        }
+        echo 'OK';
+    } else {
+        echo $pingback->getErrorSummary();
+    }
+    die;
+}
+
+function prepare_delivery_confirmation_data($order, $ref, $settings)
+{
+    $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
+    $billing = $order_wrapper->commerce_customer_billing->commerce_customer_address->value();
+
+    return array(
+        'payment_id' => $ref,
+        'type' => 'digital',
+        'status' => 'delivered',
+        'estimated_delivery_datetime' => date('Y/m/d H:i:s'),
+        'estimated_update_datetime' => date('Y/m/d H:i:s'),
+        'refundable' => 'yes',
+        'details' => 'Item will be delivered via email by ' . date('Y/m/d H:i:s'),
+        'shipping_address[email]' => $order->mail,
+        'shipping_address[firstname]' => $billing['first_name'],
+        'shipping_address[lastname]' => $billing['last_name'],
+        'shipping_address[country]' => $billing['country'],
+        'shipping_address[street]' => $billing['thoroughfare'],
+        'shipping_address[state]' => $billing['dependent_locality'],
+        'shipping_address[zip]' => $billing['postal_code'],
+        'shipping_address[city]' => $billing['administrative_area'],
+        'reason' => 'none',
+        'is_test' => $settings['is_test'],
+    );
+}

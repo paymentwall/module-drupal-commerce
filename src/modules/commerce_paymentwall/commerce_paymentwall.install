@@ -1,0 +1,38 @@
+<?php
+
+function commerce_paymentwall_requirements($phase)
+{
+    $t = get_t();
+    $requirements = array();
+
+    if ($phase == 'runtime') {
+        // Check if Paymentwall library is installed.
+        $library = libraries_detect('paymentwall');
+        if (!empty($library['installed'])) {
+            $value = $library['version'];
+            $description = NULL;
+            $severity = REQUIREMENT_OK;
+        } else {
+            $value = $t('Not installed');
+            $description = $library['error message'];
+            $severity = REQUIREMENT_ERROR;
+        }
+        $requirements['commerce_paymentwall_library'] = array(
+            'title' => $t('Paymentwall library'),
+            'value' => $value,
+            'description' => $description,
+            'severity' => $severity,
+        );
+
+        // Check if JSON decoding is available.
+        $predicate = function_exists('json_decode');
+        $requirements['commerce_paymentwall_json'] = array(
+            'title' => $t('JSON decoding (Paymentwall)'),
+            'value' => $predicate ? $t('JSON decoding available') : $t('No JSON decoding. You must enable it'),
+            'description' => NULL,
+            'severity' => $predicate ? REQUIREMENT_OK : REQUIREMENT_ERROR,
+        );
+    }
+
+    return $requirements;
+}
